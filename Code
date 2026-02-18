@@ -1,0 +1,307 @@
+Link to Google Colab Notebook : https://colab.research.google.com/drive/1nSbiYdTE7jt4Tez5dQuxDymb9G56iD6w?usp=sharing
+
+
+
+# ===========================
+# PART 0: Setup for Google Colab
+# ===========================
+import os
+import re
+import warnings
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# Install UMAP if not present
+try:
+    from umap import UMAP
+except ImportError:
+    print("Installing umap-learn...")
+    !pip install umap-learn
+    from umap import UMAP
+
+warnings.filterwarnings('ignore')
+
+# Create output folder in Colab environment
+output_folder = "/content/Journal_Club_Output"
+os.makedirs(output_folder, exist_ok=True)
+
+def make_safe_filename(text):
+    text = re.sub(r'\[.*?\]', '', text)
+    text = re.sub(r'[^\w\s-]', '', text)
+    text = text.strip().replace(' ', '_')
+    text = re.sub(r'_+', '_', text)
+    return text.lower()
+
+# ===========================
+# PART 1: Upload & Load Data
+# ===========================
+print("Please upload your Excel files (science.abk2066_table_s6.xlsx and science.abk2066_table_s7.xlsx)")
+from google.colab import files
+uploaded = files.upload()
+
+try:
+    s6_file = [f for f in uploaded.keys() if 's6' in f][0]
+    s7_file = [f for f in uploaded.keys() if 's7' in f][0]
+    print(f"Loading {s6_file} and {s7_file}...")
+except IndexError:
+    print("ERROR: Could not find files with 's6' and 's7' in the name. Please upload the correct files.")
+    raise
+
+# Load Data
+ref_df = pd.read_excel(s6_file, sheet_name='reference condition')
+clim_df = pd.read_excel(s6_file, sheet_name='C-limited condition')
+s7_desc = pd.read_excel(s7_file, sheet_name='1 - description of samples')
+s7_data = pd.read_excel(s7_file, sheet_name='2 - protein variability data')
+
+# ===========================
+# PART 2: Functional categories
+# ===========================
+def assign_functional_category(gene_name):
+    gene = str(gene_name).lower()
+    ####################################################################################################################################################################
+    if gene in ['dksa', 'rpob', 'mreb', 'rodz', 'crp', 'rsd']: return 'Of Interest'
+    ####################################################################################################################################################################
+    elif gene.startswith('rpl') or gene.startswith('rps') or gene.startswith('rpm'): return 'Ribosomal'
+    elif gene.startswith('rpo') or gene.startswith('rna'): return 'Transcription'
+    elif gene.startswith('atp'): return 'ATP synthase'
+    elif gene in ['acnA', 'acnB', 'fumA', 'fumB', 'fumC', 'gltA', 'icd', 'mdh', 'sdhA', 'sdhB', 'sdhC', 'sdhD', 'sucA', 'sucB', 'sucC', 'sucD']: return 'TCA cycle'
+    elif gene in ['pgi', 'pfkA', 'pfkB', 'fbaA', 'fbaB', 'tpiA', 'gapA', 'pgk', 'gpmA', 'gpmM', 'eno', 'pykA', 'pykF']: return 'Glycolysis'
+    elif any(x in gene for x in ['leu', 'ile', 'val', 'thr', 'met', 'lys', 'arg', 'his', 'trp', 'phe', 'tyr', 'ser', 'gly', 'ala', 'gln', 'glu', 'asn', 'asp', 'cys', 'pro']): return 'Amino acid biosynthesis'
+    elif gene.startswith('dna') or gene.startswith('rep') or gene.startswith('rec'): return 'DNA replication/repair'
+    elif gene.startswith('fts') or gene.startswith('mre') or gene in ['zipA', 'zapA', 'zapB', 'minC', 'minD', 'minE']: return 'Cell division'
+    elif any(x in gene for x in ['abc', 'mgl', 'mal', 'pst', 'pot', 'put']): return 'Transporters'
+    elif gene in ['dnaK', 'dnaJ', 'grpE', 'groEL', 'groES', 'htpG', 'ibpA', 'ibpB', 'clpB', 'lon', 'hslU', 'hslV']: return 'Chaperones/Stress'
+    else: return 'Other'
+
+features = ['protein concentration [Pi] (1/µm3)', 'mRNA concentration [mRi] (1/µm3)', 'gene concentration [Gi] (1/µm3)',
+            'translation inititation rate αpi (1/min)', 'mRNA degradation rate, δi (1/min)', 'translational burstiness, bi',
+            'transcriptional initiation rate, αmi (1/min)', 'promoter on-rate, ki (µm3/min)']
+
+# ===========================
+# PART 3: Prepare UMAP Data
+# ===========================
+print("\nPREPARING UMAP DATA")
+def prepare_umap_with_categories(df, condition_name, remove_other=False):
+    df_clean = df[['gene', 'locus'] + features].copy()
+    for col in features: df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+    df_clean = df_clean.dropna()
+    df_clean['category'] = df_clean['gene'].apply(assign_functional_category)
+    if remove_other: df_clean = df_clean[df_clean['category'] != 'Other'].copy()
+
+    feature_data = df_clean[features].apply(lambda x: np.log10(x + 1e-10))
+    feature_scaled = StandardScaler().fit_transform(feature_data)
+    embedding = UMAP(n_neighbors=15, min_dist=0.1, metric='euclidean', random_state=42).fit_transform(feature_scaled)
+    df_clean['UMAP1'] = embedding[:, 0]
+    df_clean['UMAP2'] = embedding[:, 1]
+    return df_clean
+
+print("Running UMAP calculations...")
+ref_all = prepare_umap_with_categories(ref_df, "Reference (all)", remove_other=False)
+clim_all = prepare_umap_with_categories(clim_df, "C-limited (all)", remove_other=False)
+ref_no_other = prepare_umap_with_categories(ref_df, "Reference (annotated)", remove_other=True)
+clim_no_other = prepare_umap_with_categories(clim_df, "C-limited (annotated)", remove_other=True)
+
+# ===========================
+# PART 4: Differential Analysis
+# ===========================
+print("\nPREPARING DIFFERENTIAL ANALYSIS")
+ref_clean = ref_df[['gene', 'locus'] + features].copy()
+clim_clean = clim_df[['gene', 'locus'] + features].copy()
+for col in features:
+    ref_clean[col] = pd.to_numeric(ref_clean[col], errors='coerce')
+    clim_clean[col] = pd.to_numeric(clim_clean[col], errors='coerce')
+
+merged_df = ref_clean.merge(clim_clean, on=['gene', 'locus'], suffixes=('_ref', '_clim')).dropna()
+merged_df['category'] = merged_df['gene'].apply(assign_functional_category)
+
+for feature in features:
+    merged_df[f"FC_{feature}"] = merged_df[f"{feature}_clim"] / merged_df[f"{feature}_ref"]
+    merged_df[f"log2FC_{feature}"] = np.log2(merged_df[f"FC_{feature}"])
+
+# Analysis 1: Volcano Plots
+print("Generating Analysis 1: Volcano Plots...")
+fig = make_subplots(rows=2, cols=2, subplot_titles=('Promoter on-rate', 'Protein concentration', 'mRNA concentration', 'Transcription initiation rate'))
+key_features = [('promoter on-rate, ki (µm3/min)', 1, 1), ('protein concentration [Pi] (1/µm3)', 1, 2),
+                ('mRNA concentration [mRi] (1/µm3)', 2, 1), ('transcriptional initiation rate, αmi (1/min)', 2, 2)]
+
+for feature, row, col in key_features:
+    log2fc = f"log2FC_{feature}"
+    mean_expr = (np.log10(merged_df[f"{feature}_ref"] + 1e-10) + np.log10(merged_df[f"{feature}_clim"] + 1e-10)) / 2
+    merged_df['sig'] = 'No change'
+    merged_df.loc[merged_df[log2fc] > 1, 'sig'] = 'Upregulated (>2-fold)'
+    merged_df.loc[merged_df[log2fc] < -1, 'sig'] = 'Downregulated (>2-fold)'
+
+    for sig in ['No change', 'Upregulated (>2-fold)', 'Downregulated (>2-fold)']:
+        mask = merged_df['sig'] == sig
+        color = 'gray' if sig == 'No change' else ('red' if 'Up' in sig else 'blue')
+        fig.add_trace(go.Scatter(x=mean_expr[mask], y=merged_df.loc[mask, log2fc], mode='markers', name=sig,
+                                 marker=dict(size=4, color=color, opacity=0.6), text=merged_df.loc[mask, 'gene'],
+                                 hovertemplate='<b>%{text}</b><br>Mean: %{x:.2f}<br>log2FC: %{y:.2f}<extra></extra>', showlegend=(row==1 and col==1)), row=row, col=col)
+    fig.add_hline(y=0, line_dash="dash", line_color="black", row=row, col=col)
+
+fig.update_layout(height=800, width=1200, title_text="Volcano Plots", showlegend=True)
+fig.write_html(os.path.join(output_folder, "1_volcano_plots.html"))
+
+# Analysis 2: Feature Correlations
+print("Generating Analysis 2: Feature Correlations...")
+fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+short_labels = [f.split('[')[0].strip() for f in features]
+sns.heatmap(ref_clean[features].apply(lambda x: np.log10(x+1e-10)).corr('spearman'), annot=True, fmt='.2f', cmap='coolwarm', xticklabels=short_labels, yticklabels=short_labels, ax=axes[0])
+axes[0].set_title('Reference')
+sns.heatmap(clim_clean[features].apply(lambda x: np.log10(x+1e-10)).corr('spearman'), annot=True, fmt='.2f', cmap='coolwarm', xticklabels=short_labels, yticklabels=short_labels, ax=axes[1])
+axes[1].set_title('C-limited')
+plt.tight_layout()
+plt.savefig(os.path.join(output_folder, "2_feature_correlations.png"), dpi=300)
+plt.close()
+
+# Analysis 3: Clustering
+print("Generating Analysis 3: Clustering...")
+fc_cols = [f"log2FC_{f}" for f in features]
+cluster_data = merged_df[['gene', 'category'] + fc_cols].dropna()
+cluster_data['cluster'] = KMeans(n_clusters=5, random_state=42).fit_predict(StandardScaler().fit_transform(cluster_data[fc_cols]))
+
+labels = {}
+for i in range(5):
+    mean_p = cluster_data.loc[cluster_data['cluster']==i, f"log2FC_protein concentration [Pi] (1/µm3)"].mean()
+    if mean_p > 0.5: labels[i] = f"Cluster {i}: Upregulated (Stress)"
+    elif mean_p < -0.5: labels[i] = f"Cluster {i}: Downregulated (Growth)"
+    else: labels[i] = f"Cluster {i}: Mixed/Constitutive"
+cluster_data['desc'] = cluster_data['cluster'].map(labels)
+
+fig = px.scatter(cluster_data, x=f"log2FC_promoter on-rate, ki (µm3/min)", y=f"log2FC_protein concentration [Pi] (1/µm3)",
+                 color='desc', symbol='category', hover_data=['gene'], title="Gene Clusters", width=1100, height=800)
+fig.write_html(os.path.join(output_folder, "3_gene_clusters.html"))
+
+# Analysis 4: Pathway Analysis
+print("Generating Analysis 4: Pathway Analysis...")
+pathway = merged_df.groupby('category')[[f"log2FC_promoter on-rate, ki (µm3/min)", f"log2FC_protein concentration [Pi] (1/µm3)"]].median()
+pathway = pathway.drop('Other', errors='ignore').sort_values(f"log2FC_promoter on-rate, ki (µm3/min)", ascending=False)
+pathway.plot(kind='bar', figsize=(12, 6))
+plt.title('Pathway Response')
+plt.ylabel('Median log2FC')
+plt.tight_layout()
+plt.savefig(os.path.join(output_folder, "4_pathway_response.png"))
+plt.close()
+
+# ===========================
+# ANALYSIS 5 & 6: Stress Variability & Heatmap (RENAMED CONDITIONS)
+# ===========================
+print("\n" + "="*80)
+print("ANALYSIS 5 & 6: MAPPING CONDITIONS & HEATMAPS")
+print("="*80)
+
+# Create mapping dictionary from s7_desc
+# Assuming columns are like 'Sample name' (Lib-1) and 'Description' (Glucose)
+# We need to find the right column names dynamically
+sample_col = [c for c in s7_desc.columns if 'sample' in c.lower() or 'lib' in c.lower()][0]
+desc_col = [c for c in s7_desc.columns if 'condition' in c.lower() or 'description' in c.lower()][0]
+
+condition_map = dict(zip(s7_desc[sample_col], s7_desc[desc_col]))
+print("Condition Mapping Found:")
+for k, v in list(condition_map.items())[:5]: print(f"  {k} -> {v}")
+
+# Prepare data
+sample_cols = [col for col in s7_data.columns if col.startswith('Lib-') or col in ['A2', 'C2', 'C7', 'D1', 'E4']]
+s7_clean = s7_data[['gene', 'locus'] + sample_cols].copy()
+for col in sample_cols: s7_clean[col] = pd.to_numeric(s7_clean[col], errors='coerce')
+s7_clean = s7_clean.dropna()
+s7_clean['category'] = s7_clean['gene'].apply(assign_functional_category)
+
+# RENAME COLUMNS
+s7_clean = s7_clean.rename(columns=condition_map)
+new_condition_cols = [condition_map.get(c, c) for c in sample_cols]
+
+# Analysis 5: Variability
+s7_clean['mean_expr'] = s7_clean[new_condition_cols].mean(axis=1)
+s7_clean['std_expr'] = s7_clean[new_condition_cols].std(axis=1)
+s7_clean['CV'] = s7_clean['std_expr'] / s7_clean['mean_expr']
+
+fig = px.scatter(s7_clean, x='mean_expr', y='CV', color='category', hover_data=['gene'],
+                 title="Gene Variability Across Conditions (Renamed)", labels={'mean_expr':'Mean Abundance', 'CV':'Variability'},
+                 width=1100, height=800)
+fig.write_html(os.path.join(output_folder, "5_stress_variability.html"))
+
+# Analysis 6: Heatmap
+print("Generating Heatmap...")
+heatmap_genes = s7_clean[s7_clean['category'].isin(['Of Interest', 'Transcription', 'Cell division'])].copy()
+if not heatmap_genes.empty:
+    heatmap_data = heatmap_genes[new_condition_cols]
+    heatmap_zscore = heatmap_data.apply(lambda x: (x - x.mean()) / x.std(), axis=1)
+    heatmap_zscore.index = heatmap_genes['gene']
+
+    plt.figure(figsize=(16, 12)) # Wider for readable labels
+    sns.heatmap(heatmap_zscore, cmap='RdBu_r', center=0, xticklabels=True, yticklabels=True)
+    plt.title('Relative Expression (Z-score) Across Conditions')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_folder, "6_genes_of_interest_heatmap.png"), dpi=300)
+    plt.close()
+
+# ===========================
+# ANALYSIS 7: UMAP Feature Decoding
+# ===========================
+print("\n" + "="*80)
+print("ANALYSIS 7: DECODING THE UMAP (Feature Mapping)")
+print("="*80)
+
+# We will use the Reference dataset for this baseline analysis
+df_for_mapping = ref_no_other.copy()
+
+# Define the 4 most important biophysical features to visualize
+key_biophysics = [
+    'protein concentration [Pi] (1/µm3)',
+    'transcriptional initiation rate, αmi (1/min)',
+    'translation inititation rate αpi (1/min)',
+    'mRNA degradation rate, δi (1/min)'
+]
+
+# Create a 2x2 panel
+fig = make_subplots(rows=2, cols=2, subplot_titles=[
+    'Colored by: Protein Concentration (Abundance)',
+    'Colored by: Transcription Rate (Synthesis)',
+    'Colored by: Translation Efficiency',
+    'Colored by: mRNA Instability (Degradation)'
+])
+
+# Loop through features and add to subplot
+positions = [(1,1), (1,2), (2,1), (2,2)]
+
+for (feature, (row, col)) in zip(key_biophysics, positions):
+
+    # We use the raw values for color, but log-scaled for better visualization
+    # (The UMAP was built on log values, so this visualizes the driver)
+
+    fig.add_trace(go.Scatter(
+        x=df_for_mapping['UMAP1'],
+        y=df_for_mapping['UMAP2'],
+        mode='markers',
+        marker=dict(
+            size=5,
+            color=np.log10(df_for_mapping[feature] + 1e-10), # Log scale color
+            colorscale='Viridis',
+            showscale=True,
+            colorbar=dict(len=0.4, y=(0.8 if row==1 else 0.2)) # Adjust colorbar position
+        ),
+        text=df_for_mapping['gene'],
+        customdata=df_for_mapping['category'],
+        hovertemplate='<b>%{text}</b><br>Cat: %{customdata}<br>Value: %{marker.color:.2f} (log)',
+        showlegend=False
+    ), row=row, col=col)
+
+fig.update_layout(height=900, width=1100, title_text="Decoding the UMAP: What drives the clusters?")
+fig.write_html(os.path.join(output_folder, "7_umap_feature_decoder.html"))
+print("Saved: 7_umap_feature_decoder.html")
+
+
+# Download
+print("\nANALYSIS COMPLETE! Downloading...")
+!zip -r /content/journal_club_results.zip /content/Journal_Club_Output
+files.download("/content/journal_club_results.zip")
+
